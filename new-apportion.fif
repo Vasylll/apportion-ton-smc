@@ -1,0 +1,59 @@
+#!/usr/bin/env fift -s
+"TonUtil.fif" include
+"Asm.fif" include
+
+{ ."usage: " @' $0 type ." <workchain-id> [<filename-base>]" cr
+  ."Creates a apportion smc in the specified workchain, with the controlling private key saved to or loaded from <filename-base>.pk "
+  ."('new-apportion.pk' by default)" cr 1 halt
+} : usage
+$# 1- -2 and ' usage if
+
+0 constant seq_number
+60 constant timeout   // external message expire time in seconds
+
+$1 parse-workchain-id =: wc    // set workchain id from command line argument
+def? $2 { @' $2 } { "new-apportion" } cond constant file-base
+
+."Creating new apportion smc in workchain " wc .
+
+// Create apportion smc; source code included from `apportion.fif`
+"apportion-code.fif" include
+// code
+<b seq_number 32 u, // seqno
+   file-base +".pk" load-generate-keypair
+   constant apportion_pk
+   B,               // public_key
+   0 6 u,           // members_length
+   0 1 u,           // members
+   0 1 u,           // expences
+   1 30 << Gram,    // tolerance = 1.073,741,824 Gram
+b>   // data
+null // no libraries
+
+// create StateInit
+<b b{0011} s, 3 roll ref, rot ref, swap dict, b>  // split_depth, special, code, data, library --> cell
+
+dup ."StateInit: " <s csr. cr
+dup hashu wc swap 2dup 2constant apportion_addr
+."new apportion address = " 2dup .addr cr
+2dup file-base +".addr" save-address-verbose
+."Non-bounceable address (for init): " 2dup 7 .Addr cr
+."Bounceable address (for later access): " 6 .Addr cr
+
+// create external message
+<b
+  0 32 u,           // action
+  seq_number 32 u,  // seqno
+  -1 32 i,          // valid_until
+  0 6 u,            // member_id
+b>
+
+// dup ."signing message: " <s csr. cr
+dup hashu apportion_pk ed25519_sign_uint rot
+<b b{1000100} s, apportion_addr addr, b{000010} s, swap
+  <s s, b{0} s, swap B, swap <s s, b>
+
+// dup ."External message for initialization is " <s csr. cr
+2 boc+>B dup Bx. cr
+file-base +"-query.boc" tuck B>file
+."(Saved apportion creating query to file " type .")" cr
