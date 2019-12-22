@@ -1,0 +1,57 @@
+#!/usr/bin/env fift -s
+"TonUtil.fif" include
+
+{ ."usage: " @' $0 type ." <filename-base> <member_keys> <seq_number> <amount> <dest-base> [<savefile>]" cr
+  ."Creates a withdrawal request to the smc at <filename-base>.addr, in which member is registered with public key stored at <member_keys>. "
+  ."Withdrawal payment should be send to the address from <dest-base>.addr  ('apportion-withdraw-query.boc' by default)" cr 1 halt
+} : usage
+$# dup 5 < swap 6 > or ' usage if
+
+"new-apportion" constant file-base
+0 constant seq_number
+10 constant timeout  // valid for 10 seconds
+"Apportion withdrawal!" constant comment
+
+$1 =: file-base
+$2 =: member-keys
+$3 parse-int =: seq_number
+$4 $>GR =: amount
+$5 =: dest-base
+def? $6 { @' $6 } { "apportion-withdraw-query" } cond constant savefile
+
+dest-base +".addr" load-address
+2dup 2constant dest_addr
+
+file-base +".addr" load-address
+2dup 2constant apportion_addr
+."Apportion smart contract address = " 2dup .addr cr 6 .Addr cr
+member-keys +".pk" load-generate-keypair constant apportion_priv_key constant apportion_pub_key
+
+// <b b{01} s, 0 1 i, b{000100} s, dest_addr addr,
+//  amount Gram, 0 9 64 32 + + 1+ 1+ u, 0 32 u, "Apportion!" $, b>
+
+comment simple-transfer-body
+constant body-cell
+
+<b b{01} s, 0 1 i, b{000100} s, dest_addr addr, amount Gram, 0 9 64 32 + + 1+ u,
+  body-cell <s 2dup s-fits? not rot over 1 i, -rot { drop body-cell ref, } { s, } cond
+b>
+
+// create a message
+<b
+  x{43665025} s,                    // action
+  seq_number 32 u,                  // seqno
+  now timeout + 32 u,               // valid_until
+  <b apportion_pub_key 256 B>u@ 256 u>B B, b> ref,   // member_id
+  amount Gram,
+  swap ref,
+b>
+.s
+dup ."signing message: " <s csr. cr
+dup hashu apportion_priv_key ed25519_sign_uint
+<b b{1000100} s, apportion_addr addr, 0 Gram, b{00} s,
+   swap B, swap <s s, b>
+dup ."resulting external message: " <s csr. cr
+2 boc+>B dup Bx. cr
+savefile +".boc" tuck B>file
+."(Saved to file " type .")" cr

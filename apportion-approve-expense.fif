@@ -1,0 +1,40 @@
+#!/usr/bin/env fift -s
+"TonUtil.fif" include
+
+{ ."usage: " @' $0 type ." <filename-base> <expense_id> [<savefile>]" cr
+  ."Creates a request to Apportion smart contract, to approve expense with <expense_id>, smc is controlled by <filename-base>.pk, "
+  ."and saves it into <savefile>.boc ('apportion-approve-expense-query.boc' by default)" cr 1 halt
+} : usage
+$# dup 2 < swap 3 > or ' usage if
+
+"new-apportion" constant file-base
+0 constant seq_number
+10 constant timeout  // valid for 10 seconds
+
+$1 =: file-base
+$2 parse-int =: seq_number
+$3 parse-int =: expense_id
+def? $4 { @' $4 } { "apportion-approve-expense-query" } cond constant savefile
+
+file-base +".addr" load-address
+2dup 2constant apportion_addr
+."Apportion smart contract address = " 2dup .addr cr 6 .Addr cr
+file-base +".pk" load-keypair nip constant apportion_pk
+
+// create a message
+<b
+  x{43665024} s,                    // action
+  seq_number 32 u,                  // seqno
+  now timeout + 32 u,               // valid_until
+  <b 0 256 u, b> ref,               // member_id
+  expense_id 16 u,                  // expense_id
+b>
+.s
+dup ."signing message: " <s csr. cr
+dup hashu apportion_pk ed25519_sign_uint
+<b b{1000100} s, apportion_addr addr, 0 Gram, b{00} s,
+   swap B, swap <s s, b>
+dup ."resulting external message: " <s csr. cr
+2 boc+>B dup Bx. cr
+savefile +".boc" tuck B>file
+."(Saved to file " type .")" cr

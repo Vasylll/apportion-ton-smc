@@ -1,0 +1,466 @@
+;; TODO: check error codes inside throws
+
+builder sstore_grams(builder b, int x) asm "STVARINT16";
+(slice, int) sload_grams(slice s) asm( -> 1 0) "LDVARINT16";
+(int, int, int) parse_std_addrq(slice s) asm "REWRITESTDADDRQ";
+
+_ load_data() inline_ref {
+  var ds = get_data().begin_parse();
+  var res = (
+    ds~load_uint(32),   ;; seqno
+    ds~load_uint(256),  ;; public_key
+    ds~load_uint(6),    ;; members_length
+    ds~load_dict(),     ;; members
+    ds~load_dict(),     ;; expenses
+    ds~load_grams()     ;; tolerance
+  );
+  ds.end_parse();
+  return res;
+}
+
+_ store_data(int seqno, int public_key, int members_length, cell members, cell expenses, tolerance) impure inline_ref {
+  set_data(begin_cell()
+    .store_uint(seqno, 32)
+    .store_uint(public_key, 256)
+    .store_uint(members_length, 6)
+    .store_dict(members)
+    .store_dict(expenses)
+    .store_grams(tolerance)
+  .end_cell());
+}
+
+_ pack_member(int wc, int addr, int balance, int public_key) inline {
+  return begin_cell()
+    .store_int(wc, 8)
+    .store_uint(addr, 256)
+    .sstore_grams(balance)
+    .store_uint(public_key, 256);
+}
+
+_ unpack_member(slice cs) inline_ref {
+  var (wc, addr, balance, pk) = (cs~load_int(8), cs~load_uint(256), cs~sload_grams(), cs~load_uint(256));
+  return (wc, addr, balance, pk);
+}
+
+_ pack_expense(int payer, amount, valid_until) inline_ref {
+  return begin_cell()
+    .store_uint(payer, 256)  ;; member_id
+    .store_grams(amount)
+    .store_uint(valid_until, 32);
+}
+
+_ unpack_expense(slice cs) inline_ref {
+  return (cs~load_uint(256), cs~load_grams(), cs~load_uint(32));
+}
+
+_ member_get_if_exist(cell members, int member_id) inline_ref {
+  (slice member, var found?) = members.udict_get?(256, member_id);
+  throw_unless(31, found?);
+  return member;
+}
+
+_ member_get_by_addr(cell members, int addr) inline_ref {
+  int index = -1;
+  int member_id = -1;
+  int member_balance = 0;
+  int member_pk = 0;
+  do {
+    (index, slice member, var found?) = members.udict_get_next?(256, index);
+    if (found?) {
+      var (_, addr_i, balance, pk) = unpack_member(member);
+      if (addr == addr_i) {
+        member_id = index;
+        member_balance = balance;
+        member_pk = pk;
+      }
+    }
+  } until (~ found?);
+  return (member_id, member_balance, member_pk);
+}
+
+_ member_throw_if_exist(cell members, int member_id) inline_ref {
+  (_, var found?) = members.udict_get?(256, member_id);
+  throw_if(32, found?);
+  return ();
+}
+
+;; add new member, add smc owner as well if members list is empty
+(cell, (int)) ~add_member(cell members, int members_length, slice s_addr, int pk) inline_ref {
+  (int wc, int addr) = (s_addr~load_int(8), s_addr~load_uint(256));
+  ;; (int wc, int addr) = s_addr.parse_std_addr();
+
+  members~udict_set_builder(256, pk, pack_member(wc, addr, 0, pk));
+  ;; members~udict_set_builder(256, pk, pack_member(1, 11, 0, pk));
+
+  return (members, (members_length + 1));
+}
+
+(cell, (int)) delete_member(cell members, int members_length, slice member, int tolerance) impure inline_ref {
+  var (_, _, balance, member_pk) = unpack_member(member);
+
+  throw_if(31, (balance > 0) & (balance > tolerance));
+  throw_if(31, (balance < 0) & (balance < - tolerance));
+
+  var deleted? = members~udict_delete?(256, member_pk);
+  throw_unless(36, deleted?);
+
+  return (members, (members_length - 1));
+}
+
+(cell, ()) ~add_expense(cell expenses, int payer, int amount, int valid_until) inline_ref {
+  int bits_num = 16;
+  int index = -1;
+  int new_expense_index = 0;
+  do {
+    (index, slice expense, var found?) = expenses.udict_get_next?(bits_num, index);
+    if (found?) {
+      var (_, _, valid_until_i) = unpack_expense(expense);
+      if (valid_until_i < now()) {
+        expenses~udict_delete_get?(bits_num, index);
+        new_expense_index = index;
+      } else {
+        new_expense_index = index + 1;
+      }
+    }
+  } until (~ found?);
+
+  expenses~udict_set_builder(bits_num, new_expense_index, pack_expense(payer, amount, valid_until));
+
+  return (expenses, ());
+}
+
+_ ~spread_expense(cell members, int members_length, int member_id, int amount) inline_ref {
+  slice member = members.member_get_if_exist(member_id);
+  var (wc, addr, balance, pk) = unpack_member(member);
+  members~udict_set_builder(256, member_id, pack_member(wc, addr, balance + amount, pk));
+
+  int index = -1;
+  int chunk = amount / members_length;
+  do {
+    (index, member, var found?) = members.udict_get_next?(256, index);
+    if (found?) {
+      (wc, addr, balance, pk) = unpack_member(member);
+      members~udict_set_builder(256, index, pack_member(wc, addr, balance - chunk, pk));
+    }
+  } until (~ found?);
+
+  return (members, ());
+}
+
+(cell, cell) approve_expense(cell members, int members_length, cell expenses, int expense_id) inline_ref {
+  var (expense, found?) = expenses~udict_delete_get?(16, expense_id);
+  throw_unless(31, found?);
+
+  accept_message();
+
+  var (member_id, amount, valid_until) = unpack_expense(expense);
+  throw_if(35, valid_until < now());
+  members~spread_expense(members_length, member_id, amount);
+
+  return (members, expenses);
+}
+
+_ dispatch_payment(int dest_wc, int dest_addr, int amount, cell msg) inline_ref {
+
+;;  send_raw_message(begin_cell()
+;;   .store_uint(0xc4ff, 17)
+;;   .store_uint(dest_addr, 256)
+;;   .store_grams(amount)
+;;   .store_uint(0, 1 + 4 + 4 + 64 + 32 + 1 + 1)
+;;  .end_cell(), 0);
+
+  var message = dict_empty?(msg)
+    ?  begin_cell()
+        .store_uint(1, 2) ;; flags
+        .store_int(0, 1)  ;; bounce
+        .store_uint(4, 6)
+        .store_int(dest_wc, 8)
+        .store_uint(dest_addr, 256)
+        .store_grams(amount)
+        .store_uint(0, 1 + 4 + 4 + 64 + 32 + 1 + 1)
+      .end_cell()
+    : msg;
+
+  send_raw_message(message, 0);
+
+  return ();
+}
+
+_ settle_balance(cell members, int member_id, int amount) inline_ref {
+  slice member = members.member_get_if_exist(member_id);
+  var (wc, addr, balance, pk) = unpack_member(member);
+  members~udict_set_builder(256, member_id, pack_member(wc, addr, balance + amount, pk));
+
+  return (members, ());
+}
+
+_ ~settle_creditor_balance(cell members, int member_id, int amount) inline {
+  members~settle_balance(member_id, - amount);
+
+  return (members, ());
+}
+
+_ ~settle_debtor_balance(cell members, int member_id, int amount) inline {
+  members~settle_balance(member_id, amount);
+
+  return (members, ());
+}
+
+;; Find a member who should be payed, he posses the the biggest positive balance
+(int, int, int, int, int) creditor_lookup(members, s_addr, amount, tolerance) inline_ref {
+  int source_id = -1;
+  int dest_id = -1;
+  int credit_amount = 0;
+  var (src_wc, src_addr) = s_addr.parse_std_addr();
+  int d_wc = src_wc;
+  int d_addr = src_addr;
+  int index = -1;
+  do {
+    var (index, member, found?) = members.udict_get_next?(256, index);
+    if (found?) {
+      var (wc, addr, balance, pk) = unpack_member(member);
+      if (addr == src_addr) {
+        source_id = index;
+      }
+      if (balance > credit_amount & (balance - amount < tolerance)) {
+        dest_id = index;
+        d_wc = wc;
+        d_addr = addr;
+        credit_amount = balance;
+      }
+    }
+  } until (~ credit_amount);
+  return (source_id, dest_id, d_wc, d_addr, credit_amount);
+}
+
+;; () recv_internal(cell in_msg) impure {
+;;   ;; do nothing for internal messages
+;; }
+
+() recv_internal(int amount, cell in_msg_cell, slice in_msg) impure {
+  ;; dispatch payment if it is not a simple transfer
+  var cs = in_msg_cell.begin_parse();
+  var flags = cs~load_uint(4);
+  if (flags & 1) {
+    ;; ignore all bounced messages
+    return ();
+  }
+
+  var s_addr = cs~load_msg_addr();
+
+  ;;| in_msg.slice_empty?()
+  ;; balance is positive if member should receive grams (poor member, creditor)
+  ;; balance is negative if member should send grams (rich member, debtor)
+
+  var (stored_seqno, owner_pk, members_length, members, expenses, tolerance) = load_data();
+  int credit_amount = 0;
+  int source_id = 0;
+  do {
+    (source_id, int dest_id, int d_wc, int d_addr, credit_amount) = creditor_lookup(members, s_addr, amount - credit_amount, tolerance);
+    if (credit_amount) {
+      dispatch_payment(d_wc, d_addr, credit_amount, new_dict());
+      members~settle_creditor_balance(dest_id, credit_amount);
+    }
+  } until (~ credit_amount);
+
+  members~settle_debtor_balance(source_id, amount);
+  store_data(stored_seqno, owner_pk, members_length, members, expenses, tolerance);
+
+  return ();
+}
+
+(cell, ()) ~withdraw(members, tolerance, int member_id, int amount, cell msg) {
+  slice member = member_get_if_exist(members, member_id);
+  var (wc, addr, balance, _) = unpack_member(member);
+  throw_if(36, (balance > 0) & (balance - amount < tolerance));
+
+  accept_message();
+
+  dispatch_payment(wc, addr, amount, msg);
+  members~settle_creditor_balance(member_id, amount);
+
+  return (members, ());
+}
+
+() recv_external(slice in_msg) impure {
+  var signature = in_msg~load_bits(512);
+  var cs = in_msg;
+  var (action, msg_seqno, valid_until, cs_member_id) = (cs~load_uint(32), cs~load_uint(32), cs~load_uint(32), cs~load_ref());
+  throw_if(35, valid_until <= now());
+  var (stored_seqno, owner_pk, members_length, members, expenses, tolerance) = load_data();
+
+  throw_unless(33, msg_seqno == stored_seqno);
+  int member_id = cs_member_id.begin_parse().preload_uint(256);
+  ifnot (action | msg_seqno | member_id) {
+    accept_message();
+    store_data(stored_seqno + 1, owner_pk, members_length, members, expenses, tolerance);
+
+    return ();
+  }
+
+  var public_key = owner_pk;
+  if (member_id > 0) {
+    slice member = member_get_if_exist(members, member_id);
+    (_, _, _, public_key) = unpack_member(member);
+  }
+  throw_unless(36, check_signature(slice_hash(in_msg), signature, public_key));
+
+  ;; accept_message();
+
+  ;; TODO: remove this action for production
+  ;; change smart contract code
+  if (action == 0x4e436f64) {
+    accept_message();
+
+    store_data(stored_seqno + 1, owner_pk, members_length, members, expenses, tolerance);
+
+    var new_code = cs~load_ref();
+    cs.end_parse();
+    set_code(new_code);
+
+    return ();
+  }
+
+  if (owner_pk == public_key) {
+    if (action == 0x43665021) {
+      ;; add new member
+      var (new_member_addr, new_member_pk) = (cs~load_ref(), cs~load_ref());
+      var s_addr = new_member_addr.begin_parse();
+      var pk = new_member_pk.begin_parse().preload_uint(256);
+      member_throw_if_exist(members, pk);
+      accept_message();
+      (members_length) = members~add_member(members_length, s_addr, pk);
+
+    }  elseif (action == 0x43665022) {
+      ;; delete member
+      int del_member_id = cs~load_ref().begin_parse().preload_uint(256);
+      slice member = member_get_if_exist(members, del_member_id);
+      accept_message();
+      (members_length) = members~delete_member(members_length, member, tolerance);
+
+    } elseif (action == 0x43665024) {
+      ;; approve expense
+      int expense_id = cs~load_uint(16);
+      (members, expenses) = approve_expense(members, members_length, expenses, expense_id);
+
+    } elseif (action == 0x50624b21) {
+      ;; change owner public key
+      accept_message();
+      owner_pk = cs~load_ref().begin_parse().preload_uint(256);
+      cs.end_parse();
+    }
+  }
+
+  ;; owner and any member actions
+  if (action == 0x43665023) {
+    ;; add expense
+    (int amount, int valid_until) = (cs~load_grams(), cs~load_uint(32));
+    throw_if(35, valid_until < now());
+    (_, var found?) = members.udict_get?(256, member_id);
+    throw_unless(31, found?);
+    accept_message();
+    expenses~add_expense(member_id, amount, valid_until);
+
+  } elseif (action == 0x43665025) {
+    ;; withdraw grams from smc balance
+    var amount = cs~load_grams();
+    var msg = new_dict();
+    ifnot (slice_refs_empty?(cs)) {
+      msg = cs~load_ref();
+    }
+    throw_if(33, (get_balance().first() - amount) < tolerance);
+    members~withdraw(tolerance, member_id, amount, msg);
+
+  }
+
+  store_data(stored_seqno + 1, owner_pk, members_length, members, expenses, tolerance);
+
+  return ();
+}
+
+
+
+
+
+;; Get methods
+
+_ get_member_by_id (int member_id) method_id {
+  var (_, _, members_length, members, _, _) = load_data();
+  slice member = member_get_if_exist(members, member_id);
+  var (wc, addr, balance, pk) = unpack_member(member);
+
+  return (wc, addr, balance, pk, members_length);
+}
+
+_ get_member_by_addr (int addr) method_id {
+  var (_, _, members_length, members, _, _) = load_data();
+  (int member_id, int balance, int pk) = member_get_by_addr(members, addr);
+  return (member_id, balance, pk, members_length);
+}
+
+_ get_members() method_id {
+  var (_, _, _, members, _, _) = load_data();
+  int index = -1;
+  var res = nil;
+  do {
+    (index, _, int found) = members.udict_get_next?(256, index);
+    if (found) {
+      res = cons(index, res);
+    }
+  } until (~ found);
+
+  return (index, res);
+}
+
+_ get_expenses() method_id {
+  var (_, _, _, _, expenses, _) = load_data();
+  int index = -1;
+  var res = nil;
+  do {
+    (index, _, int found) = expenses.udict_get_next?(16, index);
+    if (found) {
+      res = cons(index, res);
+    }
+  } until (~ found);
+
+  return (index, res);
+}
+
+_ get_expense_by_id(int expense_id) method_id {
+  var (_, _, _, _, expenses, _) = load_data();
+  (slice expense, var found?) = expenses.udict_get?(16, expense_id);
+  throw_unless(31, found?);
+  var (member_id, amount, valid_until_i) = unpack_expense(expense);
+
+  return (member_id, amount, valid_until_i);
+}
+
+int seqno() method_id {
+  return get_data().begin_parse().preload_uint(32);
+}
+int tolerance() method_id {
+  var (_, _, _, _, _, tolerance) = load_data();
+  return tolerance;
+}
+int members_length() method_id {
+  var (_, _, members_length, _, _, _) = load_data();
+  return members_length;
+}
+int publickey() method_id {
+  var (_, public_key, _, _, _, _) = load_data();
+  return public_key;
+}
+
+int now_time() method_id {
+  return now();
+}
+
+_ my_addr() method_id {
+  var my = my_address();
+  slice loaded = my~load_msg_addr();
+  return (my_address(), load_msg_addr(my_address()), parse_std_addr(my_address()), parse_std_addr(loaded));
+}
+
+_ balance() method_id {
+  return (get_balance());
+}

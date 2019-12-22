@@ -1,0 +1,47 @@
+#!/usr/bin/env fift -s
+"TonUtil.fif" include
+
+{ ."usage: " @' $0 type ." <filename-base> <member_keys> <seq_number> <amount> [<savefile>]" cr
+  ."Creates a request to Apportion smart contract, requesting to change its smart contract code to the one currently stored in apportion-code.fif, "
+  ."with private key loaded from file <filename-base>.pk, "
+  ."and saves it into <savefile>.boc ('apportion-add-expense-query.boc' by default)" cr 1 halt
+} : usage
+$# dup 4 < swap 5 > or ' usage if
+
+"new-apportion" constant file-base
+0 constant seq_number
+10 constant timeout  // valid for 10 seconds
+604800 constant expense_valid_timeout // expense is valid (should be approved within) 7 days == 604800 seconds
+
+$1 =: file-base
+$2 =: member-keys
+$3 parse-int =: seq_number
+$4 $>GR =: amount
+def? $5 { @' $5 } { "apportion-add-expense-query" } cond constant savefile
+
+file-base +".addr" load-address
+2dup 2constant apportion_addr
+."Apportion smart contract address = " 2dup .addr cr 6 .Addr cr
+member-keys +".pk" load-generate-keypair constant apportion_priv_key constant apportion_pub_key
+
+// ."MEMBER " apportion_pub_key 256 B>u@  .dump cr cr
+
+
+// create a message
+<b
+  x{43665023} s,                    // action
+  seq_number 32 u,                  // seqno
+  now timeout + 32 u,               // valid_until
+  <b apportion_pub_key 256 B>u@ 256 u>B B, b> ref,   // payer (member_id)
+  amount Gram,                      // amount
+  now expense_valid_timeout + 32 u, // valid_until
+b>
+.s
+dup ."signing message: " <s csr. cr
+dup hashu apportion_priv_key ed25519_sign_uint
+<b b{1000100} s, apportion_addr addr, 0 Gram, b{00} s,
+   swap B, swap <s s, b>
+dup ."resulting external message: " <s csr. cr
+2 boc+>B dup Bx. cr
+savefile +".boc" tuck B>file
+."(Saved to file " type .")" cr

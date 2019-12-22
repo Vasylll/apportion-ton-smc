@@ -1,0 +1,41 @@
+#!/usr/bin/env fift -s
+"TonUtil.fif" include
+
+{ ."usage: " @' $0 type ." <filename-base> <seqno> <new-pk>.pk [<savefile>]" cr
+  ."Creates a request to replace public key at Apportion smc created by new-apportion.fif, with private key loaded from file <filename-base>.pk "
+  ."and address from <filename-base>.addr with <new-pk>.pk, and saves request into <savefile>.boc ('apportion_update_pk-query.boc' by default)" cr 1 halt
+} : usage
+$# dup 3 < swap 4 > or ' usage if
+
+$1 =: file-base
+$2 parse-int =: seq_number
+$3 =: new-pk
+def? $4 { @' $4 } { "apportion_update_pk-query" } cond constant savefile
+100 constant timeout   // external message expire time in seconds
+
+file-base +".addr" load-address
+2dup 2constant apportion_addr
+."Apportion address = " 2dup .addr cr 6 .Addr cr
+file-base +".pk" load-keypair constant apportion_priv_key constant apportion_pub_key
+new-pk +".pk" load-keypair constant new_priv_key constant new_pub_key
+
+."Replace current public key " apportion_pub_key 256 B>u@ .dump cr
+."       with new public key " new_pub_key 256 B>u@ .dump cr cr
+
+// create external message
+<b
+  x{50624b21} s,            // action
+  seq_number 32 u,          // seqno
+  now timeout + 32 u,       // valid_until
+  <b 0 256 u, b> ref,       // member_id
+  <b new_pub_key B, b> ref, // new public key
+b>
+.s
+dup ."signing message: " <s csr. cr
+dup hashu apportion_priv_key ed25519_sign_uint
+<b b{1000100} s, apportion_addr addr, 0 Gram, b{00} s,
+  swap B, swap <s s, b>
+dup ."resulting external message: " <s csr. cr
+2 boc+>B dup Bx. cr
+savefile +".boc" tuck B>file
+."(Saved to file " type .")" cr
