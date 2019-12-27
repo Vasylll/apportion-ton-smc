@@ -1,8 +1,5 @@
-;; TODO: check error codes inside throws
-
 builder sstore_grams(builder b, int x) asm "STVARINT16";
 (slice, int) sload_grams(slice s) asm( -> 1 0) "LDVARINT16";
-(int, int, int) parse_std_addrq(slice s) asm "REWRITESTDADDRQ";
 
 _ load_data() inline_ref {
   var ds = get_data().begin_parse();
@@ -87,10 +84,7 @@ _ member_throw_if_exist(cell members, int member_id) inline_ref {
 ;; add new member, add smc owner as well if members list is empty
 (cell, (int)) ~add_member(cell members, int members_length, slice s_addr, int pk) inline_ref {
   (int wc, int addr) = (s_addr~load_int(8), s_addr~load_uint(256));
-  ;; (int wc, int addr) = s_addr.parse_std_addr();
-
   members~udict_set_builder(256, pk, pack_member(wc, addr, 0, pk));
-  ;; members~udict_set_builder(256, pk, pack_member(1, 11, 0, pk));
 
   return (members, (members_length + 1));
 }
@@ -102,7 +96,7 @@ _ member_throw_if_exist(cell members, int member_id) inline_ref {
   throw_if(31, (balance < 0) & (balance < - tolerance));
 
   var deleted? = members~udict_delete?(256, member_pk);
-  throw_unless(36, deleted?);
+  throw_unless(37, deleted?);
 
   return (members, (members_length - 1));
 }
@@ -233,10 +227,6 @@ _ ~settle_debtor_balance(cell members, int member_id, int amount) inline {
   return (source_id, dest_id, d_wc, d_addr, credit_amount);
 }
 
-;; () recv_internal(cell in_msg) impure {
-;;   ;; do nothing for internal messages
-;; }
-
 () recv_internal(int amount, cell in_msg_cell, slice in_msg) impure {
   ;; dispatch payment if it is not a simple transfer
   var cs = in_msg_cell.begin_parse();
@@ -248,7 +238,6 @@ _ ~settle_debtor_balance(cell members, int member_id, int amount) inline {
 
   var s_addr = cs~load_msg_addr();
 
-  ;;| in_msg.slice_empty?()
   ;; balance is positive if member should receive grams (poor member, creditor)
   ;; balance is negative if member should send grams (rich member, debtor)
 
@@ -309,17 +298,17 @@ _ ~settle_debtor_balance(cell members, int member_id, int amount) inline {
 
   ;; TODO: remove this action for production
   ;; change smart contract code
-  if (action == 0x4e436f64) {
-    accept_message();
+  ;; if (action == 0x4e436f64) {
+  ;;   accept_message();
 
-    store_data(stored_seqno + 1, owner_pk, members_length, members, expenses, tolerance);
+  ;;   store_data(stored_seqno + 1, owner_pk, members_length, members, expenses, tolerance);
 
-    var new_code = cs~load_ref();
-    cs.end_parse();
-    set_code(new_code);
+  ;;   var new_code = cs~load_ref();
+  ;;   cs.end_parse();
+  ;;   set_code(new_code);
 
-    return ();
-  }
+  ;;   return ();
+  ;; }
 
   if (owner_pk == public_key) {
     if (action == 0x43665021) {
