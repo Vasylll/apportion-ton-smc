@@ -75,7 +75,7 @@ _ member_get_by_addr(cell members, int addr) inline_ref {
   return (member_id, member_balance, member_pk);
 }
 
-_ member_throw_if_exist(cell members, int member_id) inline_ref {
+_ member_throw_if_exist(cell members, int member_id) impure inline_ref {
   (_, var found?) = members.udict_get?(256, member_id);
   throw_if(32, found?);
   return ();
@@ -154,15 +154,7 @@ _ ~spread_expense(cell members, int members_length, int member_id, int amount) i
   return (members, expenses);
 }
 
-_ dispatch_payment(int dest_wc, int dest_addr, int amount, cell msg) inline_ref {
-
-;;  send_raw_message(begin_cell()
-;;   .store_uint(0xc4ff, 17)
-;;   .store_uint(dest_addr, 256)
-;;   .store_grams(amount)
-;;   .store_uint(0, 1 + 4 + 4 + 64 + 32 + 1 + 1)
-;;  .end_cell(), 0);
-
+_ dispatch_payment(int dest_wc, int dest_addr, int amount, cell msg) impure inline_ref {
   var message = dict_empty?(msg)
     ?  begin_cell()
         .store_uint(1, 2) ;; flags
@@ -172,6 +164,8 @@ _ dispatch_payment(int dest_wc, int dest_addr, int amount, cell msg) inline_ref 
         .store_uint(dest_addr, 256)
         .store_grams(amount)
         .store_uint(0, 1 + 4 + 4 + 64 + 32 + 1 + 1)
+;;        .store_uint(0, 32)
+;;        .store_uint(0x4170706f7274696f6e2100, 88);  ;; comment: "Apportion!"
       .end_cell()
     : msg;
 
