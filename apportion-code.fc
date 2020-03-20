@@ -71,7 +71,7 @@ _ member_get_by_addr(cell members, int addr) inline_ref {
         member_pk = pk;
       }
     }
-  } until (~ found?);
+  } until (~ found? | member_pk);
   return (member_id, member_balance, member_pk);
 }
 
@@ -144,30 +144,29 @@ _ ~spread_expense(cell members, int members_length, int member_id, int amount) i
 (cell, cell) approve_expense(cell members, int members_length, cell expenses, int expense_id) inline_ref {
   var (expense, found?) = expenses~udict_delete_get?(16, expense_id);
   throw_unless(31, found?);
+  var (member_id, amount, valid_until) = unpack_expense(expense);
+  throw_if(35, valid_until < now());
 
   accept_message();
 
-  var (member_id, amount, valid_until) = unpack_expense(expense);
-  throw_if(35, valid_until < now());
   members~spread_expense(members_length, member_id, amount);
 
   return (members, expenses);
 }
 
-_ dispatch_payment(int dest_wc, int dest_addr, int amount, cell msg) impure inline_ref {
-  var message = dict_empty?(msg)
-    ?  begin_cell()
-        .store_uint(1, 2) ;; flags
-        .store_int(0, 1)  ;; bounce
-        .store_uint(4, 6)
-        .store_int(dest_wc, 8)
-        .store_uint(dest_addr, 256)
-        .store_grams(amount)
-        .store_uint(0, 1 + 4 + 4 + 64 + 32 + 1 + 1)
+_ dispatch_payment(int dest_wc, int dest_addr, int amount) impure inline_ref {
+  var message =
+    begin_cell()
+      .store_uint(1, 2) ;; flags
+      .store_int(0, 1)  ;; bounce
+      .store_uint(4, 6)
+      .store_int(dest_wc, 8)
+      .store_uint(dest_addr, 256)
+      .store_grams(amount)
+      .store_uint(0, 1 + 4 + 4 + 64 + 32 + 1 + 1)
 ;;        .store_uint(0, 32)
 ;;        .store_uint(0x4170706f7274696f6e2100, 88);  ;; comment: "Apportion!"
-      .end_cell()
-    : msg;
+    .end_cell();
 
   send_raw_message(message, 0);
 
@@ -195,8 +194,7 @@ _ ~settle_debtor_balance(cell members, int member_id, int amount) inline {
 }
 
 ;; Find a member who should be payed, he posses the the biggest positive balance
-(int, int, int, int, int) creditor_lookup(members, s_addr, amount, tolerance) inline_ref {
-  int source_id = -1;
+(int, int, int, int, int) creditor_lookup(members, s_addr, amount, tolerance, source_id) inline_ref {
   int dest_id = -1;
   int credit_amount = 0;
   var (src_wc, src_addr) = s_addr.parse_std_addr();
@@ -207,17 +205,17 @@ _ ~settle_debtor_balance(cell members, int member_id, int amount) inline {
     var (index, member, found?) = members.udict_get_next?(256, index);
     if (found?) {
       var (wc, addr, balance, pk) = unpack_member(member);
-      if (addr == src_addr) {
+      if (~ source_id & (addr == src_addr)) {
         source_id = index;
       }
-      if (balance > credit_amount & (balance - amount < tolerance)) {
+      if (balance > credit_amount & (balance - amount < tolerance) & (addr != src_addr)) {
         dest_id = index;
         d_wc = wc;
         d_addr = addr;
         credit_amount = balance;
       }
     }
-  } until (~ credit_amount);
+  } until (~ found? | (source_id & credit_amount));
   return (source_id, dest_id, d_wc, d_addr, credit_amount);
 }
 
@@ -239,9 +237,9 @@ _ ~settle_debtor_balance(cell members, int member_id, int amount) inline {
   int credit_amount = 0;
   int source_id = 0;
   do {
-    (source_id, int dest_id, int d_wc, int d_addr, credit_amount) = creditor_lookup(members, s_addr, amount - credit_amount, tolerance);
+    (source_id, int dest_id, int d_wc, int d_addr, credit_amount) = creditor_lookup(members, s_addr, amount - credit_amount, tolerance, source_id);
     if (credit_amount) {
-      dispatch_payment(d_wc, d_addr, credit_amount, new_dict());
+      dispatch_payment(d_wc, d_addr, credit_amount);
       members~settle_creditor_balance(dest_id, credit_amount);
     }
   } until (~ credit_amount);
@@ -252,14 +250,14 @@ _ ~settle_debtor_balance(cell members, int member_id, int amount) inline {
   return ();
 }
 
-(cell, ()) ~withdraw(members, tolerance, int member_id, int amount, cell msg) {
+(cell, ()) ~withdraw(members, tolerance, int member_id, int amount) {
   slice member = member_get_if_exist(members, member_id);
   var (wc, addr, balance, _) = unpack_member(member);
   throw_if(36, (balance > 0) & (balance - amount < tolerance));
 
   accept_message();
 
-  dispatch_payment(wc, addr, amount, msg);
+  dispatch_payment(wc, addr, amount);
   members~settle_creditor_balance(member_id, amount);
 
   return (members, ());
@@ -292,17 +290,17 @@ _ ~settle_debtor_balance(cell members, int member_id, int amount) inline {
 
   ;; TODO: remove this action for production
   ;; change smart contract code
-  ;; if (action == 0x4e436f64) {
-  ;;   accept_message();
+  if (action == 0x4e436f64) {
+    accept_message();
 
-  ;;   store_data(stored_seqno + 1, owner_pk, members_length, members, expenses, tolerance);
+    store_data(stored_seqno + 1, owner_pk, members_length, members, expenses, tolerance);
 
-  ;;   var new_code = cs~load_ref();
-  ;;   cs.end_parse();
-  ;;   set_code(new_code);
+    var new_code = cs~load_ref();
+    cs.end_parse();
+    set_code(new_code);
 
-  ;;   return ();
-  ;; }
+    return ();
+  }
 
   if (owner_pk == public_key) {
     if (action == 0x43665021) {
@@ -347,12 +345,8 @@ _ ~settle_debtor_balance(cell members, int member_id, int amount) inline {
   } elseif (action == 0x43665025) {
     ;; withdraw grams from smc balance
     var amount = cs~load_grams();
-    var msg = new_dict();
-    ifnot (slice_refs_empty?(cs)) {
-      msg = cs~load_ref();
-    }
     throw_if(33, (get_balance().first() - amount) < tolerance);
-    members~withdraw(tolerance, member_id, amount, msg);
+    members~withdraw(tolerance, member_id, amount);
 
   }
 
@@ -360,10 +354,6 @@ _ ~settle_debtor_balance(cell members, int member_id, int amount) inline {
 
   return ();
 }
-
-
-
-
 
 ;; Get methods
 
